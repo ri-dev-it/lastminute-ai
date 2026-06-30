@@ -4,12 +4,14 @@ import {
   BarChart3,
   Bot,
   CalendarClock,
+  CalendarDays,
+  ChevronDown,
   CheckCircle2,
   ClipboardList,
   Code2,
   Flame,
+  Home,
   Lightbulb,
-  Mic2,
   Moon,
   PenLine,
   Plus,
@@ -19,53 +21,88 @@ import {
   Sun,
   Target,
   Timer,
-  UserRound,
+  Trash2,
+  Trophy,
+  X,
 } from "lucide-react";
 import Login from "./assets/login.jsx";
 import SignUp from "./assets/signin.jsx";
 import { useAuth } from "./context/AuthContext.jsx";
+import { useTasks } from "./hooks/useTasks.js";
+import { generateAiPriority } from "./services/aiPrioritizer.js";
 import { fallbackRecommendation, generateNextMove } from "./services/geminiService.js";
 
-const seedTasks = [
+const priorityScore = { High: 3, Medium: 2, Low: 1 };
+
+const taskTypes = [
+  { key: "job", label: "Jobs & Internships", shortLabel: "Job / Internship", icon: Code2 },
   {
-    id: 1,
-    title: "Submit Google Hackathon proposal",
-    category: "Hackathon",
-    deadline: "2026-06-29T22:30",
-    effort: 90,
-    impact: "High",
-    status: "In progress",
+    key: "hackathon",
+    label: "Hackathons & Competitions",
+    shortLabel: "Hackathon / Competition",
+    icon: Trophy,
   },
-  {
-    id: 2,
-    title: "Record 2 minute demo walkthrough",
-    category: "Demo",
-    deadline: "2026-06-30T09:00",
-    effort: 45,
-    impact: "High",
-    status: "Queued",
-  },
-  {
-    id: 3,
-    title: "Polish pitch deck problem slide",
-    category: "Pitch",
-    deadline: "2026-06-30T14:00",
-    effort: 35,
-    impact: "Medium",
-    status: "Queued",
-  },
+  { key: "meeting", label: "Meetings & Events", shortLabel: "Meeting / Event", icon: CalendarDays },
+  { key: "personal", label: "Personal Tasks", shortLabel: "Personal Task", icon: Home },
 ];
 
-const impactScore = { High: 3, Medium: 2, Low: 1 };
+const categoryMeta = taskTypes.reduce((meta, type) => {
+  meta[type.key] = type;
+  return meta;
+}, {});
 
-const categoryMeta = {
-  Hackathon: { icon: Code2, label: "Build" },
-  Demo: { icon: Mic2, label: "Demo" },
-  Pitch: { icon: PenLine, label: "Pitch" },
-  Personal: { icon: UserRound, label: "Personal" },
+const jobStatuses = [
+  "Applied",
+  "OA Received",
+  "Interview Scheduled",
+  "Rejected",
+  "Offer Received",
+];
+
+const priorityOptions = ["High", "Medium", "Low"];
+
+const emptyForms = {
+  job: {
+    company: "",
+    role: "",
+    status: "Applied",
+    deadline: "",
+    interviewDate: "",
+    notes: "",
+    subtasksText: "",
+    priority: "High",
+  },
+  hackathon: {
+    competitionName: "",
+    teamName: "",
+    round: "",
+    deadline: "",
+    githubLink: "",
+    demoLink: "",
+    notes: "",
+    subtasksText: "",
+    priority: "High",
+  },
+  meeting: {
+    title: "",
+    date: "",
+    time: "",
+    description: "",
+    reminder: "",
+    priority: "Medium",
+  },
+  personal: {
+    title: "",
+    description: "",
+    deadline: "",
+    duration: "",
+    priority: "Medium",
+    subtasksText: "",
+  },
 };
 
 function hoursUntil(deadline) {
+  if (!deadline) return Number.POSITIVE_INFINITY;
   return (new Date(deadline).getTime() - Date.now()) / 36e5;
 }
 
@@ -79,10 +116,11 @@ function getRisk(deadline) {
 
 function getPriority(task) {
   const hours = Math.max(hoursUntil(task.deadline), 0.5);
-  return Math.round((impactScore[task.impact] * 120) / hours + task.effort / 8);
+  return Math.round((priorityScore[task.priority] * 120) / hours + task.effort / 8);
 }
 
 function formatDeadline(deadline) {
+  if (!deadline) return "No deadline";
   return new Intl.DateTimeFormat("en", {
     month: "short",
     day: "numeric",
@@ -92,6 +130,7 @@ function formatDeadline(deadline) {
 }
 
 function isDueToday(deadline) {
+  if (!deadline) return false;
   const today = new Date();
   const date = new Date(deadline);
 
@@ -129,19 +168,539 @@ function TaskIcon({ category }) {
   );
 }
 
+function getTaskTitle(task) {
+  if (task.type === "job") return `${task.company} ${task.role}`.trim() || task.title;
+  if (task.type === "hackathon") return task.competitionName || task.title;
+  return task.title;
+}
+
+function getTaskSubtitle(task) {
+  if (task.type === "job") {
+    return [task.status, task.deadline && `Deadline: ${formatDeadline(task.deadline)}`]
+      .filter(Boolean)
+      .join(" - ");
+  }
+
+  if (task.type === "hackathon") {
+    return [
+      task.round && `Round: ${task.round}`,
+      task.deadline && `Deadline: ${formatDeadline(task.deadline)}`,
+    ]
+      .filter(Boolean)
+      .join(" - ");
+  }
+
+  if (task.type === "meeting") {
+    return [formatDeadline(task.deadline), task.reminder].filter(Boolean).join(" - ");
+  }
+
+  return [task.priority && `Priority: ${task.priority}`, task.duration && `Duration: ${task.duration}`]
+    .filter(Boolean)
+    .join(" - ");
+}
+
+function getTaskSearchText(task) {
+  return [
+    getTaskTitle(task),
+    getTaskSubtitle(task),
+    task.company,
+    task.role,
+    task.competitionName,
+    task.teamName,
+    task.description,
+    task.notes,
+    task.priority,
+    task.status,
+    task.round,
+    ...(task.subtasks || []),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function parseSubtasks(text) {
+  return text
+    .split("\n")
+    .map((item) => item.replace(/^[-*]\s*/, "").trim())
+    .filter(Boolean);
+}
+
+function taskToForm(task) {
+  return {
+    ...emptyForms[task.type],
+    ...task,
+    subtasksText: (task.subtasks || []).join("\n"),
+  };
+}
+
+function formToTask(type, form, editingTask) {
+  const base = {
+    id: editingTask?.id || crypto.randomUUID(),
+    type,
+    priority: form.priority,
+    effort: type === "hackathon" ? 90 : type === "job" ? 60 : 30,
+    completed: editingTask?.completed || false,
+  };
+
+  if (type === "job") {
+    return {
+      ...base,
+      company: form.company.trim(),
+      role: form.role.trim(),
+      title: `${form.company} ${form.role}`.trim(),
+      status: form.status,
+      deadline: form.deadline,
+      interviewDate: form.interviewDate,
+      notes: form.notes.trim(),
+      subtasks: parseSubtasks(form.subtasksText),
+    };
+  }
+
+  if (type === "hackathon") {
+    return {
+      ...base,
+      competitionName: form.competitionName.trim(),
+      teamName: form.teamName.trim(),
+      title: form.competitionName.trim(),
+      round: form.round.trim(),
+      deadline: form.deadline,
+      githubLink: form.githubLink.trim(),
+      demoLink: form.demoLink.trim(),
+      notes: form.notes.trim(),
+      subtasks: parseSubtasks(form.subtasksText),
+    };
+  }
+
+  if (type === "meeting") {
+    return {
+      ...base,
+      title: form.title.trim(),
+      date: form.date,
+      time: form.time,
+      deadline: form.date && form.time ? `${form.date}T${form.time}` : "",
+      description: form.description.trim(),
+      reminder: form.reminder.trim(),
+    };
+  }
+
+  return {
+    ...base,
+    title: form.title.trim(),
+    description: form.description.trim(),
+    deadline: form.deadline,
+    duration: form.duration.trim(),
+    subtasks: parseSubtasks(form.subtasksText),
+  };
+}
+
+function isFormValid(type, form) {
+  if (type === "job") return form.company.trim() && form.role.trim() && form.deadline;
+  if (type === "hackathon") return form.competitionName.trim() && form.deadline;
+  if (type === "meeting") return form.title.trim() && form.date && form.time;
+  return form.title.trim();
+}
+
+function formatConfidence(confidence) {
+  const value = String(confidence || "").trim();
+  if (!value) return "";
+  return value.endsWith("%") ? value : `${value}%`;
+}
+
+function AddTaskModal({ editingTask, onClose, onSave }) {
+  const [selectedType, setSelectedType] = useState(editingTask?.type || "");
+  const [forms, setForms] = useState(() => ({
+    ...emptyForms,
+    ...(editingTask ? { [editingTask.type]: taskToForm(editingTask) } : {}),
+  }));
+  const form = selectedType ? forms[selectedType] : null;
+
+  function handleCategoryChange(value) {
+    setSelectedType(value);
+  }
+
+  function updateField(field, value) {
+    setForms((current) => ({
+      ...current,
+      [selectedType]: { ...current[selectedType], [field]: value },
+    }));
+  }
+
+  function handleSubmit(event) {
+    event.preventDefault();
+    console.log("FORM SUBMITTED");
+    if (!selectedType || !isFormValid(selectedType, form)) {
+      console.log("Task form validation failed:", { selectedType, form });
+      return;
+    }
+    const taskData = formToTask(selectedType, form, editingTask);
+    console.log(taskData);
+    onSave(taskData);
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <form className="card task-modal" onSubmit={handleSubmit}>
+        <div className="card-header">
+          <div>
+            <span className="subtle-label">{editingTask ? "Edit task" : "Add task"}</span>
+            <h2>{selectedType ? categoryMeta[selectedType].shortLabel : "Create task"}</h2>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close">
+            <X size={18} />
+          </button>
+        </div>
+
+        <label>
+          Category
+          <select
+            required
+            value={selectedType}
+            onChange={(event) => handleCategoryChange(event.target.value)}
+          >
+            <option value="">Select category</option>
+            {taskTypes.map((type) => (
+              <option key={type.key} value={type.key}>
+                {type.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {selectedType && (
+          <>
+            {selectedType === "job" && (
+              <>
+                <div className="form-row">
+                  <label>
+                    Company
+                    <input value={form.company} onChange={(event) => updateField("company", event.target.value)} />
+                  </label>
+                  <label>
+                    Role
+                    <input value={form.role} onChange={(event) => updateField("role", event.target.value)} />
+                  </label>
+                </div>
+                <div className="form-row">
+                  <label>
+                    Status
+                    <select value={form.status} onChange={(event) => updateField("status", event.target.value)}>
+                      {jobStatuses.map((status) => (
+                        <option key={status}>{status}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Priority
+                    <select value={form.priority} onChange={(event) => updateField("priority", event.target.value)}>
+                      {priorityOptions.map((priority) => (
+                        <option key={priority}>{priority}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <div className="form-row">
+                  <label>
+                    Deadline
+                    <input type="datetime-local" value={form.deadline} onChange={(event) => updateField("deadline", event.target.value)} />
+                  </label>
+                  <label>
+                    Interview date
+                    <input type="datetime-local" value={form.interviewDate} onChange={(event) => updateField("interviewDate", event.target.value)} />
+                  </label>
+                </div>
+              </>
+            )}
+
+            {selectedType === "hackathon" && (
+              <>
+                <div className="form-row">
+                  <label>
+                    Competition name
+                    <input value={form.competitionName} onChange={(event) => updateField("competitionName", event.target.value)} />
+                  </label>
+                  <label>
+                    Team name
+                    <input value={form.teamName} onChange={(event) => updateField("teamName", event.target.value)} />
+                  </label>
+                </div>
+                <div className="form-row">
+                  <label>
+                    Round
+                    <input value={form.round} onChange={(event) => updateField("round", event.target.value)} />
+                  </label>
+                  <label>
+                    Deadline
+                    <input type="datetime-local" value={form.deadline} onChange={(event) => updateField("deadline", event.target.value)} />
+                  </label>
+                </div>
+                <div className="form-row">
+                  <label>
+                    GitHub link
+                    <input value={form.githubLink} onChange={(event) => updateField("githubLink", event.target.value)} />
+                  </label>
+                  <label>
+                    Demo link
+                    <input value={form.demoLink} onChange={(event) => updateField("demoLink", event.target.value)} />
+                  </label>
+                </div>
+              </>
+            )}
+
+            {selectedType === "meeting" && (
+              <>
+                <label>
+                  Title
+                  <input value={form.title} onChange={(event) => updateField("title", event.target.value)} />
+                </label>
+                <div className="form-row">
+                  <label>
+                    Date
+                    <input type="date" value={form.date} onChange={(event) => updateField("date", event.target.value)} />
+                  </label>
+                  <label>
+                    Time
+                    <input type="time" value={form.time} onChange={(event) => updateField("time", event.target.value)} />
+                  </label>
+                </div>
+                <label>
+                  Reminder
+                  <input value={form.reminder} onChange={(event) => updateField("reminder", event.target.value)} />
+                </label>
+              </>
+            )}
+
+            {selectedType === "personal" && (
+              <>
+                <label>
+                  Title
+                  <input value={form.title} onChange={(event) => updateField("title", event.target.value)} />
+                </label>
+                <div className="form-row">
+                  <label>
+                    Deadline
+                    <input type="datetime-local" value={form.deadline} onChange={(event) => updateField("deadline", event.target.value)} />
+                  </label>
+                  <label>
+                    Duration
+                    <input value={form.duration} onChange={(event) => updateField("duration", event.target.value)} />
+                  </label>
+                </div>
+              </>
+            )}
+
+            {selectedType !== "meeting" && (
+              <label>
+                Subtasks
+                <textarea
+                  value={form.subtasksText}
+                  onChange={(event) => updateField("subtasksText", event.target.value)}
+                  placeholder="One task per line"
+                />
+              </label>
+            )}
+
+            {(selectedType === "meeting" || selectedType === "personal") && (
+              <label>
+                Description
+                <textarea
+                  value={form.description}
+                  onChange={(event) => updateField("description", event.target.value)}
+                />
+              </label>
+            )}
+
+            {(selectedType === "job" || selectedType === "hackathon") && (
+              <label>
+                Notes
+                <textarea value={form.notes} onChange={(event) => updateField("notes", event.target.value)} />
+              </label>
+            )}
+
+            {selectedType !== "job" && (
+              <label>
+                Priority
+                <select value={form.priority} onChange={(event) => updateField("priority", event.target.value)}>
+                  {priorityOptions.map((priority) => (
+                    <option key={priority}>{priority}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+
+          </>
+        )}
+
+        <div className="modal-actions">
+          <button className="secondary-action" type="button" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" disabled={!selectedType || !isFormValid(selectedType, form)}>
+            <Plus size={18} />
+            {editingTask ? "Save changes" : "Add task"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function TaskCard({ task, onEdit, onDelete, onToggleComplete }) {
+  return (
+    <article className={`task-item opportunity-card ${task.completed ? "completed" : ""}`}>
+      <TaskIcon category={task.type} />
+      <div className="task-body">
+        <div className="task-title-row">
+          <h3>{getTaskTitle(task)}</h3>
+          <span className={`risk-pill ${getRisk(task.deadline).toLowerCase()}`}>
+            {task.completed ? "Done" : getRisk(task.deadline)}
+          </span>
+        </div>
+        <p>{getTaskSubtitle(task)}</p>
+        {(task.notes || task.description) && <p>{task.notes || task.description}</p>}
+        {task.subtasks?.length > 0 && (
+          <ul className="subtask-list">
+            {task.subtasks.map((subtask) => (
+              <li key={subtask}>{subtask}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div className="task-actions">
+        <strong className="priority-score">{task.priority}</strong>
+        <button type="button" onClick={() => onToggleComplete(task.id)} aria-label="Complete task">
+          <CheckCircle2 size={17} />
+        </button>
+        <button type="button" onClick={() => onEdit(task)} aria-label="Edit task">
+          <PenLine size={17} />
+        </button>
+        <button type="button" onClick={() => onDelete(task.id)} aria-label="Delete task">
+          <Trash2 size={17} />
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function CategorySection({ type, tasks, collapsed, onToggle, ...cardActions }) {
+  const Icon = type.icon;
+  const activeCount = tasks.filter((task) => !task.completed).length;
+
+  return (
+    <section className="category-section">
+      <button className="category-header" type="button" onClick={() => onToggle(type.key)}>
+        <span className="category-title">
+          <Icon size={21} />
+          {type.label}
+        </span>
+        <span className="category-count">{activeCount} active</span>
+        <ChevronDown className={collapsed ? "" : "open"} size={20} />
+      </button>
+
+      {!collapsed && (
+        <div className="task-stack">
+          {tasks.length ? (
+            tasks.map((task) => <TaskCard key={task.id} task={task} {...cardActions} />)
+          ) : (
+            <p className="empty-category">No tasks added yet</p>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AiPrioritizerModal({ status, result, error, onClose }) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="card task-modal ai-prioritizer-modal" aria-live="polite">
+        <div className="card-header">
+          <div>
+            <span className="subtle-label">AI Prioritizer</span>
+            <h2>AI Prioritizer</h2>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close">
+            <X size={18} />
+          </button>
+        </div>
+
+        {status === "empty" && (
+          <p className="ai-prioritizer-message">
+            No tasks available to prioritize. Create your first task to receive AI recommendations.
+          </p>
+        )}
+
+        {status === "loading" && (
+          <div className="ai-prioritizer-loading">
+            <span className="loader" />
+            <p>Analyzing your workload...</p>
+          </div>
+        )}
+
+        {status === "error" && (
+          <p className="form-error">
+            {error || "No tasks available to prioritize. Create your first task to receive AI recommendations."}
+          </p>
+        )}
+
+        {status === "ready" && result && (
+          <div className="ai-prioritizer-result">
+            <div>
+              <span>Task to do now</span>
+              <strong>{result.priorityTask}</strong>
+            </div>
+            <div>
+              <span>Category</span>
+              <strong>{result.category}</strong>
+            </div>
+            <div>
+              <span>Why this is important</span>
+              <p>{result.reason}</p>
+            </div>
+            <div>
+              <span>Recommended focus time</span>
+              <strong>{result.focusTime}</strong>
+            </div>
+            <div>
+              <span>Next action</span>
+              <p>{result.nextAction}</p>
+            </div>
+            <div>
+              <span>Confidence score</span>
+              <strong>{formatConfidence(result.confidence)}</strong>
+            </div>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
 function Dashboard({ theme, onToggleTheme }) {
   const { currentUser, logout } = useAuth();
-  const [tasks, setTasks] = useState(seedTasks);
+  const {
+    tasks,
+    loading: tasksLoading,
+    addTask,
+    updateTask,
+    deleteTask,
+  } = useTasks();
+  const [searchQuery, setSearchQuery] = useState("");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [priorityFilter, setPriorityFilter] = useState("all");
+  const [collapsedSections, setCollapsedSections] = useState({});
+  const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
+  const [editingTask, setEditingTask] = useState(null);
+  const [prioritizerModal, setPrioritizerModal] = useState({
+    isOpen: false,
+    status: "idle",
+    result: null,
+    error: "",
+  });
   const [aiRecommendation, setAiRecommendation] = useState(fallbackRecommendation);
   const [isAnalyzingTasks, setIsAnalyzingTasks] = useState(false);
   const [aiError, setAiError] = useState("");
-  const [form, setForm] = useState({
-    title: "",
-    category: "Hackathon",
-    deadline: "",
-    effort: "30",
-    impact: "High",
-  });
 
   const rankedTasks = useMemo(
     () =>
@@ -151,6 +710,23 @@ function Dashboard({ theme, onToggleTheme }) {
       }),
     [tasks],
   );
+
+  const filteredTasks = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+
+    return rankedTasks.filter((task) => {
+      const matchesSearch = !query || getTaskSearchText(task).includes(query);
+      const matchesType = typeFilter === "all" || task.type === typeFilter;
+      const matchesStatus =
+        statusFilter === "all" ||
+        (statusFilter === "active" && !task.completed) ||
+        (statusFilter === "completed" && task.completed) ||
+        task.status === statusFilter;
+      const matchesPriority = priorityFilter === "all" || task.priority === priorityFilter;
+
+      return matchesSearch && matchesType && matchesStatus && matchesPriority;
+    });
+  }, [priorityFilter, rankedTasks, searchQuery, statusFilter, typeFilter]);
 
   const todayTasks = rankedTasks.filter((task) => isDueToday(task.deadline));
   const topTask = rankedTasks[0];
@@ -172,6 +748,13 @@ function Dashboard({ theme, onToggleTheme }) {
   const userInitial = userName.charAt(0).toUpperCase();
 
   useEffect(() => {
+    if (!rankedTasks.length) {
+      setAiRecommendation(fallbackRecommendation);
+      setAiError("");
+      setIsAnalyzingTasks(false);
+      return undefined;
+    }
+
     let isCurrent = true;
     const debounceId = window.setTimeout(async () => {
       try {
@@ -184,7 +767,7 @@ function Dashboard({ theme, onToggleTheme }) {
         }
       } catch {
         if (isCurrent) {
-          setAiError("Unable to generate AI recommendation.");
+          setAiError("AI recommendation unavailable.");
           setAiRecommendation(fallbackRecommendation);
         }
       } finally {
@@ -200,31 +783,139 @@ function Dashboard({ theme, onToggleTheme }) {
     };
   }, [rankedTasks]);
 
-  function updateForm(field, value) {
-    setForm((current) => ({ ...current, [field]: value }));
-  }
-
-  function handleSubmit(event) {
-    event.preventDefault();
-    if (!form.title.trim() || !form.deadline) return;
-
-    setTasks((current) => [
-      ...current,
-      {
-        id: crypto.randomUUID(),
-        title: form.title.trim(),
-        category: form.category,
-        deadline: form.deadline,
-        effort: Number(form.effort),
-        impact: form.impact,
-        status: "Queued",
-      },
-    ]);
-    setForm({ title: "", category: "Hackathon", deadline: "", effort: "30", impact: "High" });
-  }
-
   async function handleLogout() {
     await logout();
+  }
+
+  async function handleSaveTask(task) {
+    try {
+      if (editingTask) {
+        await updateTask(task.id, task);
+      } else {
+        await addTask(task);
+      }
+
+      setTypeFilter("all");
+      setStatusFilter("all");
+      setPriorityFilter("all");
+      setEditingTask(null);
+      setIsTaskModalOpen(false);
+    } catch (error) {
+      console.error("Failed to save task:", error);
+      alert(error.message);
+    }
+  }
+
+  function handleOpenTaskModal() {
+    setEditingTask(null);
+    setIsTaskModalOpen(true);
+  }
+
+  function handleEditTask(task) {
+    setEditingTask(task);
+    setIsTaskModalOpen(true);
+  }
+
+  async function handleDeleteTask(taskId) {
+    try {
+      await deleteTask(taskId);
+    } catch (error) {
+      console.error("Failed to delete task:", error);
+      alert(error.message);
+    }
+  }
+
+  async function handleToggleComplete(taskId) {
+    const task = tasks.find((item) => item.id === taskId);
+    if (!task) return;
+
+    const completed = !task.completed;
+
+    try {
+      await updateTask(taskId, {
+        completed,
+        status: completed ? "completed" : "todo",
+      });
+    } catch (error) {
+      console.error("Failed to update task completion:", error);
+      alert(error.message);
+    }
+  }
+
+  function handleCloseTaskModal() {
+    setEditingTask(null);
+    setIsTaskModalOpen(false);
+  }
+
+  function toggleSection(type) {
+    setCollapsedSections((current) => ({ ...current, [type]: !current[type] }));
+  }
+
+  async function handleAiPrioritize() {
+    console.log("AI Prioritizer clicked");
+    console.log("AI Prioritizer selected category:", typeFilter);
+    console.log("AI Prioritizer task count:", tasks.length);
+
+    const jobs = tasks.filter((task) => task.type === "job");
+    const hackathons = tasks.filter((task) => task.type === "hackathon");
+    const meetings = tasks.filter((task) => task.type === "meeting");
+    const personal = tasks.filter((task) => task.type === "personal");
+    const allTasks = [
+      ...jobs,
+      ...hackathons,
+      ...meetings,
+      ...personal,
+    ];
+
+    console.log("Jobs:", jobs);
+    console.log("Hackathons:", hackathons);
+    console.log("Meetings:", meetings);
+    console.log("Personal:", personal);
+    console.log("Combined tasks:", allTasks);
+    allTasks.forEach((task, index) => {
+      console.log(`AI Prioritizer task ${index + 1}:`, task);
+      console.log(`AI Prioritizer task ${index + 1} selected category:`, task.type);
+    });
+
+    if (!allTasks.length) {
+      setPrioritizerModal({ isOpen: true, status: "empty", result: null, error: "" });
+      return;
+    }
+
+    setPrioritizerModal({ isOpen: true, status: "loading", result: null, error: "" });
+
+    try {
+      const tasksForAi = allTasks.map((task) => ({
+        title: getTaskTitle(task),
+        category: categoryMeta[task.type]?.label || task.type,
+        deadline: task.deadline || "",
+        dueDate: task.dueDate || task.deadline || "",
+        priority: task.priority || "",
+        estimatedEffort: task.effort ? `${task.effort} minutes` : "",
+        duration: task.duration || "",
+        status: task.status || (task.completed ? "Completed" : "Active"),
+        completed: task.completed || false,
+        overdueRisk: getRisk(task.deadline),
+        notes: task.notes || task.description || "",
+        subtasks: task.subtasks || [],
+      }));
+      console.log("Sending to offline prioritizer:", tasksForAi);
+      const result = await generateAiPriority(tasksForAi);
+      console.log("Final prioritization result:", result);
+      setPrioritizerModal({ isOpen: true, status: "ready", result, error: "" });
+    } catch (error) {
+      console.error("AI Prioritizer failed:", error);
+      setPrioritizerModal({
+        isOpen: true,
+        status: "error",
+        result: null,
+        error: "No tasks available to prioritize. Create your first task to receive AI recommendations.",
+      });
+    }
+  }
+
+  function closePrioritizerModal() {
+    setPrioritizerModal((current) => ({ ...current, isOpen: false }));
   }
 
   return (
@@ -239,7 +930,12 @@ function Dashboard({ theme, onToggleTheme }) {
 
         <label className="search-box" aria-label="Search tasks">
           <Search size={18} strokeWidth={2.1} />
-          <input type="search" placeholder="Search tasks, deadlines, priorities..." />
+          <input
+            type="search"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Search tasks, deadlines, priorities..."
+          />
         </label>
 
         <div className="topbar-actions">
@@ -261,7 +957,7 @@ function Dashboard({ theme, onToggleTheme }) {
       <section className="hero-summary">
         <div className="hero-greeting">
           <span className="subtle-label">Workspace</span>
-          <h1>Good Morning, {userName} 👋</h1>
+          <h1>Good Morning, {userName}</h1>
           <p>Here is the calm version of everything trying to become urgent today.</p>
         </div>
 
@@ -294,79 +990,66 @@ function Dashboard({ theme, onToggleTheme }) {
 
       <section className="content-grid">
         <div className="main-column">
-          <form className="card task-composer" id="task-form" onSubmit={handleSubmit}>
+          <section className="card task-manager" id="tasks">
             <div className="card-header">
               <div>
-                <span className="subtle-label">Task input</span>
-                <h2>Add a deadline</h2>
+                <span className="subtle-label">Task Manager</span>
+                <h2>Opportunity tasks</h2>
               </div>
-              <Plus size={21} />
+              <div className="task-manager-actions">
+                <button className="task-add-button" type="button" onClick={handleAiPrioritize}>
+                  <Sparkles size={18} />
+                  ✨ AI Prioritizer
+                </button>
+                <button className="task-add-button" type="button" onClick={handleOpenTaskModal}>
+                  <Plus size={18} />
+                  Add Task
+                </button>
+              </div>
             </div>
 
-            <label>
-              Task name
-              <input
-                type="text"
-                value={form.title}
-                onChange={(event) => updateForm("title", event.target.value)}
-                placeholder="e.g. Finish Gemini API flow"
-              />
-            </label>
-
-            <div className="form-row">
-              <label>
-                Category
-                <select
-                  value={form.category}
-                  onChange={(event) => updateForm("category", event.target.value)}
-                >
-                  <option>Hackathon</option>
-                  <option>Demo</option>
-                  <option>Pitch</option>
-                  <option>Personal</option>
-                </select>
-              </label>
-              <label>
-                Impact
-                <select
-                  value={form.impact}
-                  onChange={(event) => updateForm("impact", event.target.value)}
-                >
-                  <option>High</option>
-                  <option>Medium</option>
-                  <option>Low</option>
-                </select>
-              </label>
+            <div className="task-filters">
+              <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
+                <option value="all">All categories</option>
+                {taskTypes.map((type) => (
+                  <option key={type.key} value={type.key}>
+                    {type.label}
+                  </option>
+                ))}
+              </select>
+              <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+                <option value="all">All statuses</option>
+                <option value="active">Active</option>
+                <option value="completed">Completed</option>
+                {jobStatuses.map((status) => (
+                  <option key={status}>{status}</option>
+                ))}
+              </select>
+              <select value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value)}>
+                <option value="all">All priorities</option>
+                {priorityOptions.map((priority) => (
+                  <option key={priority}>{priority}</option>
+                ))}
+              </select>
             </div>
 
-            <div className="form-row">
-              <label>
-                Deadline
-                <input
-                  type="datetime-local"
-                  value={form.deadline}
-                  onChange={(event) => updateForm("deadline", event.target.value)}
+            <div className="category-list">
+              {taskTypes.map((type) => (
+                <CategorySection
+                  key={type.key}
+                  type={type}
+                  tasks={filteredTasks.filter((task) => task.type === type.key)}
+                  collapsed={collapsedSections[type.key]}
+                  onToggle={toggleSection}
+                  onEdit={handleEditTask}
+                  onDelete={handleDeleteTask}
+                  onToggleComplete={handleToggleComplete}
                 />
-              </label>
-              <label>
-                Effort minutes
-                <input
-                  type="number"
-                  min="10"
-                  step="5"
-                  value={form.effort}
-                  onChange={(event) => updateForm("effort", event.target.value)}
-                />
-              </label>
+              ))}
             </div>
+          </section>
 
-            <button type="submit">
-              <Plus size={18} />
-              Add task
-            </button>
-          </form>
-
-          <section className="card" id="tasks">
+          <section className="card">
             <div className="card-header">
               <div>
                 <span className="subtle-label">Today</span>
@@ -378,16 +1061,16 @@ function Dashboard({ theme, onToggleTheme }) {
             <div className="task-stack">
               {rankedTasks.slice(0, 4).map((task) => (
                 <article className="task-item" key={task.id}>
-                  <TaskIcon category={task.category} />
+                  <TaskIcon category={task.type} />
                   <div className="task-body">
                     <div className="task-title-row">
-                      <h3>{task.title}</h3>
+                      <h3>{getTaskTitle(task)}</h3>
                       <span className={`risk-pill ${getRisk(task.deadline).toLowerCase()}`}>
                         {getRisk(task.deadline)}
                       </span>
                     </div>
                     <p>
-                      {categoryMeta[task.category]?.label || task.category} · {task.status} ·{" "}
+                      {categoryMeta[task.type]?.shortLabel || task.type} - {task.status || task.priority} -{" "}
                       {formatDeadline(task.deadline)}
                     </p>
                     <div className="progress-track">
@@ -412,9 +1095,9 @@ function Dashboard({ theme, onToggleTheme }) {
             <div className="deadline-list">
               {(upcomingTasks.length ? upcomingTasks : rankedTasks).slice(0, 4).map((task) => (
                 <article className="deadline-item" key={task.id}>
-                  <TaskIcon category={task.category} />
+                  <TaskIcon category={task.type} />
                   <div>
-                    <h3>{task.title}</h3>
+                    <h3>{getTaskTitle(task)}</h3>
                     <p>{formatDeadline(task.deadline)}</p>
                   </div>
                   <span>{task.effort}m</span>
@@ -517,6 +1200,18 @@ function Dashboard({ theme, onToggleTheme }) {
           </section>
         </aside>
       </section>
+
+      {isTaskModalOpen && (
+        <AddTaskModal editingTask={editingTask} onClose={handleCloseTaskModal} onSave={handleSaveTask} />
+      )}
+      {prioritizerModal.isOpen && (
+        <AiPrioritizerModal
+          status={prioritizerModal.status}
+          result={prioritizerModal.result}
+          error={prioritizerModal.error}
+          onClose={closePrioritizerModal}
+        />
+      )}
     </main>
   );
 }
