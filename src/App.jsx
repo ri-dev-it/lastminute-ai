@@ -1,28 +1,38 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, Navigate, NavLink, Route, Routes } from "react-router-dom";
 import {
+  AlertTriangle,
   BarChart3,
+  Bell,
   Bot,
   CalendarClock,
   CalendarDays,
   ChevronDown,
   CheckCircle2,
   ClipboardList,
+  Clock,
   Code2,
   Flame,
   Home,
   Lightbulb,
+  ListTodo,
+  LogOut,
+  Menu,
   Moon,
+  Palette,
   PenLine,
   Plus,
   Quote,
   Search,
+  Settings,
+  SlidersHorizontal,
   Sparkles,
   Sun,
   Target,
   Timer,
   Trash2,
   Trophy,
+  User,
   X,
 } from "lucide-react";
 import Login from "./assets/login.jsx";
@@ -676,6 +686,38 @@ function AiPrioritizerModal({ status, result, error, onClose }) {
   );
 }
 
+const accentPresets = [
+  { name: "Sage Green", value: "#6E7D68" },
+  { name: "Terracotta", value: "#A86952" },
+  { name: "Slate Blue", value: "#66758F" },
+  { name: "Warm Brown", value: "#7A6652" },
+  { name: "Olive", value: "#777C4F" },
+];
+
+function ToggleSwitch({ checked, onChange, label }) {
+  return (
+    <button
+      className={`toggle-switch ${checked ? "is-on" : ""}`}
+      type="button"
+      onClick={() => onChange(!checked)}
+      aria-pressed={checked}
+      aria-label={label}
+    >
+      <span />
+    </button>
+  );
+}
+
+function EmptyState({ title, children }) {
+  return (
+    <div className="empty-state">
+      <ClipboardList size={24} />
+      <h3>{title}</h3>
+      <p>{children}</p>
+    </div>
+  );
+}
+
 function Dashboard({ theme, onToggleTheme }) {
   const { currentUser, logout } = useAuth();
   const {
@@ -746,9 +788,11 @@ function Dashboard({ theme, onToggleTheme }) {
   const upcomingTasks = rankedTasks.filter((task) => !isDueToday(task.deadline)).slice(0, 4);
   const userName = currentUser?.displayName || currentUser?.email?.split("@")[0] || "Riya";
   const userInitial = userName.charAt(0).toUpperCase();
+  void tasksLoading;
 
   useEffect(() => {
     if (!rankedTasks.length) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setAiRecommendation(fallbackRecommendation);
       setAiError("");
       setIsAnalyzingTasks(false);
@@ -1216,6 +1260,548 @@ function Dashboard({ theme, onToggleTheme }) {
   );
 }
 
+Dashboard.displayName = "LegacyDashboard";
+
+function DashboardShell({ theme, onToggleTheme }) {
+  const { currentUser, logout } = useAuth();
+  const { tasks, addTask, updateTask, deleteTask } = useTasks();
+  const [searchQuery, setSearchQuery] = useState("");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [priorityFilter, setPriorityFilter] = useState("all");
+  const [collapsedSections, setCollapsedSections] = useState({});
+  const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
+  const [editingTask, setEditingTask] = useState(null);
+  const [activeView, setActiveView] = useState("dashboard");
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [accentColor, setAccentColor] = useState(
+    () => localStorage.getItem("lastminute-accent") || accentPresets[0].value,
+  );
+  const [settingsState, setSettingsState] = useState({
+    startTime: "09:00",
+    endTime: "18:00",
+    focusGoal: 4,
+    pomodoro: 25,
+    shortBreak: 5,
+    longBreak: 15,
+    deadlineReminders: true,
+    aiSuggestions: true,
+    browserNotifications: false,
+    emailNotifications: false,
+    planningStyle: "Balanced",
+    priorityMethod: "Balanced",
+    aiPersonality: "Calm Planner",
+  });
+  const [prioritizerModal, setPrioritizerModal] = useState({
+    isOpen: false,
+    status: "idle",
+    result: null,
+    error: "",
+  });
+  const [aiRecommendation, setAiRecommendation] = useState(fallbackRecommendation);
+  const [isAnalyzingTasks, setIsAnalyzingTasks] = useState(false);
+  const [aiError, setAiError] = useState("");
+
+  const rankedTasks = useMemo(
+    () =>
+      [...tasks].sort((a, b) => {
+        const priorityDelta = getPriority(b) - getPriority(a);
+        return priorityDelta || new Date(a.deadline) - new Date(b.deadline);
+      }),
+    [tasks],
+  );
+
+  const filteredTasks = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+
+    return rankedTasks.filter((task) => {
+      const matchesSearch = !query || getTaskSearchText(task).includes(query);
+      const matchesType = typeFilter === "all" || task.type === typeFilter;
+      const matchesStatus =
+        statusFilter === "all" ||
+        (statusFilter === "active" && !task.completed) ||
+        (statusFilter === "completed" && task.completed) ||
+        task.status === statusFilter;
+      const matchesPriority = priorityFilter === "all" || task.priority === priorityFilter;
+
+      return matchesSearch && matchesType && matchesStatus && matchesPriority;
+    });
+  }, [priorityFilter, rankedTasks, searchQuery, statusFilter, typeFilter]);
+
+  const todayTasks = rankedTasks.filter((task) => isDueToday(task.deadline));
+  const completedTasks = tasks.filter((task) => task.completed);
+  const overdueTasks = tasks.filter((task) => !task.completed && getRisk(task.deadline) === "Overdue");
+  const topTask = rankedTasks[0];
+  const criticalTasks = tasks.filter((task) => ["Critical", "Overdue"].includes(getRisk(task.deadline)));
+  const totalEffort = tasks.reduce((sum, task) => sum + Number(task.effort), 0);
+  const averagePriority = Math.round(rankedTasks.reduce((sum, task) => sum + getPriority(task), 0) / rankedTasks.length);
+  const productivityScore = Math.min(98, Math.max(42, Math.round(84 + tasks.length * 2 - criticalTasks.length * 8)));
+  const upcomingTasks = rankedTasks.filter((task) => !isDueToday(task.deadline)).slice(0, 4);
+  const userName = currentUser?.displayName || currentUser?.email?.split("@")[0] || "Riya";
+  const userInitial = userName.charAt(0).toUpperCase();
+  const todayDate = new Intl.DateTimeFormat("en", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  }).format(new Date());
+
+  useEffect(() => {
+    document.documentElement.style.setProperty("--primary", accentColor);
+    document.documentElement.style.setProperty("--accent", accentColor);
+    localStorage.setItem("lastminute-accent", accentColor);
+  }, [accentColor]);
+
+  useEffect(() => {
+    if (!rankedTasks.length) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setAiRecommendation(fallbackRecommendation);
+      setAiError("");
+      setIsAnalyzingTasks(false);
+      return undefined;
+    }
+
+    let isCurrent = true;
+    const debounceId = window.setTimeout(async () => {
+      try {
+        setIsAnalyzingTasks(true);
+        setAiError("");
+        const recommendation = await generateNextMove(rankedTasks);
+        if (isCurrent) setAiRecommendation(recommendation);
+      } catch {
+        if (isCurrent) {
+          setAiError("AI recommendation unavailable.");
+          setAiRecommendation(fallbackRecommendation);
+        }
+      } finally {
+        if (isCurrent) setIsAnalyzingTasks(false);
+      }
+    }, 650);
+
+    return () => {
+      isCurrent = false;
+      window.clearTimeout(debounceId);
+    };
+  }, [rankedTasks]);
+
+  async function handleLogout() {
+    await logout();
+  }
+
+  async function handleSaveTask(task) {
+    try {
+      if (editingTask) {
+        await updateTask(task.id, task);
+      } else {
+        await addTask(task);
+      }
+
+      setTypeFilter("all");
+      setStatusFilter("all");
+      setPriorityFilter("all");
+      setEditingTask(null);
+      setIsTaskModalOpen(false);
+    } catch (error) {
+      console.error("Failed to save task:", error);
+      alert(error.message);
+    }
+  }
+
+  function handleOpenTaskModal() {
+    setEditingTask(null);
+    setIsTaskModalOpen(true);
+  }
+
+  function handleEditTask(task) {
+    setEditingTask(task);
+    setIsTaskModalOpen(true);
+  }
+
+  async function handleDeleteTask(taskId) {
+    try {
+      await deleteTask(taskId);
+    } catch (error) {
+      console.error("Failed to delete task:", error);
+      alert(error.message);
+    }
+  }
+
+  async function handleToggleComplete(taskId) {
+    const task = tasks.find((item) => item.id === taskId);
+    if (!task) return;
+
+    const completed = !task.completed;
+
+    try {
+      await updateTask(taskId, {
+        completed,
+        status: completed ? "completed" : "todo",
+      });
+    } catch (error) {
+      console.error("Failed to update task completion:", error);
+      alert(error.message);
+    }
+  }
+
+  async function handleAiPrioritize() {
+    const allTasks = [
+      ...tasks.filter((task) => task.type === "job"),
+      ...tasks.filter((task) => task.type === "hackathon"),
+      ...tasks.filter((task) => task.type === "meeting"),
+      ...tasks.filter((task) => task.type === "personal"),
+    ];
+
+    if (!allTasks.length) {
+      setPrioritizerModal({ isOpen: true, status: "empty", result: null, error: "" });
+      return;
+    }
+
+    setPrioritizerModal({ isOpen: true, status: "loading", result: null, error: "" });
+
+    try {
+      const tasksForAi = allTasks.map((task) => ({
+        title: getTaskTitle(task),
+        category: categoryMeta[task.type]?.label || task.type,
+        deadline: task.deadline || "",
+        dueDate: task.dueDate || task.deadline || "",
+        priority: task.priority || "",
+        estimatedEffort: task.effort ? `${task.effort} minutes` : "",
+        duration: task.duration || "",
+        status: task.status || (task.completed ? "Completed" : "Active"),
+        completed: task.completed || false,
+        overdueRisk: getRisk(task.deadline),
+        notes: task.notes || task.description || "",
+        subtasks: task.subtasks || [],
+      }));
+      const result = await generateAiPriority(tasksForAi);
+      setPrioritizerModal({ isOpen: true, status: "ready", result, error: "" });
+    } catch (error) {
+      console.error("AI Prioritizer failed:", error);
+      setPrioritizerModal({
+        isOpen: true,
+        status: "error",
+        result: null,
+        error: "No tasks available to prioritize. Create your first task to receive AI recommendations.",
+      });
+    }
+  }
+
+  function updateSetting(key, value) {
+    setSettingsState((current) => ({ ...current, [key]: value }));
+  }
+
+  function showView(view) {
+    setActiveView(view);
+    setIsSidebarOpen(false);
+  }
+
+  const navItems = [
+    { key: "dashboard", label: "Dashboard", icon: Home },
+    { key: "tasks", label: "Tasks", icon: ListTodo },
+    { key: "planner", label: "AI Planner", icon: Bot },
+    { key: "settings", label: "Settings", icon: Settings },
+  ];
+
+  const viewTitle = {
+    dashboard: `Good morning, ${userName}`,
+    tasks: "Tasks",
+    planner: "AI Planner",
+    settings: "Settings",
+  }[activeView];
+
+  const viewDescription = {
+    dashboard: "A focused view of what matters today, without the noise.",
+    tasks: "Search, filter, and move work forward with the same task workflow.",
+    planner: "Shape your day around working hours, priorities, and calm focus blocks.",
+    settings: "Tune the workspace presentation and productivity preferences.",
+  }[activeView];
+
+  return (
+    <main className="app-shell">
+      <button className="mobile-menu-button" type="button" onClick={() => setIsSidebarOpen(true)} aria-label="Open navigation">
+        <Menu size={20} />
+      </button>
+
+      <aside className={`sidebar ${isSidebarOpen ? "open" : ""}`}>
+        <div className="sidebar-header">
+          <Link to="/dashboard" className="brand" aria-label="LastMinute AI dashboard">
+            <span className="brand-mark"><Sparkles size={19} /></span>
+            <span>LastMinute AI</span>
+          </Link>
+          <button className="icon-button mobile-close" type="button" onClick={() => setIsSidebarOpen(false)} aria-label="Close navigation">
+            <X size={18} />
+          </button>
+        </div>
+
+        <nav className="sidebar-nav" aria-label="Workspace navigation">
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button key={item.key} className={`sidebar-link ${activeView === item.key ? "active" : ""}`} type="button" onClick={() => showView(item.key)}>
+                <Icon size={18} />
+                {item.label}
+              </button>
+            );
+          })}
+        </nav>
+
+        <div className="sidebar-footer">
+          <div className="user-menu" aria-label="Signed in user">
+            {currentUser?.photoURL ? <img src={currentUser.photoURL} alt={userName} /> : <span className="avatar">{userInitial}</span>}
+            <span>{userName}</span>
+          </div>
+          <button className="logout-button" type="button" onClick={handleLogout}>
+            <LogOut size={17} />
+            Logout
+          </button>
+        </div>
+      </aside>
+
+      {isSidebarOpen && <button className="sidebar-scrim" type="button" onClick={() => setIsSidebarOpen(false)} aria-label="Close navigation" />}
+
+      <section className="workspace">
+        <header className="workspace-header">
+          <div>
+            <span className="subtle-label">{todayDate}</span>
+            <h1>{viewTitle}</h1>
+            <p>{viewDescription}</p>
+          </div>
+          <button className="primary-action" type="button" onClick={handleOpenTaskModal}>
+            <Plus size={18} />
+            New Task
+          </button>
+        </header>
+
+        {activeView === "dashboard" && (
+          <div className="view-stack">
+            <section className="metric-grid">
+              <article className="stat-card"><CalendarClock size={20} /><span>Today's Tasks</span><strong>{todayTasks.length}</strong></article>
+              <article className="stat-card"><CheckCircle2 size={20} /><span>Completed</span><strong>{completedTasks.length}</strong></article>
+              <article className="stat-card"><AlertTriangle size={20} /><span>Overdue</span><strong>{overdueTasks.length}</strong></article>
+              <article className="stat-card score-stat"><div className="score-ring" style={{ "--score": `${productivityScore * 3.6}deg` }}><strong>{productivityScore}</strong></div><span>Focus Score</span></article>
+            </section>
+
+            <section className="dashboard-grid">
+              <div className="card dashboard-today-card">
+                <div className="card-header"><div><span className="subtle-label">Today</span><h2>Today's Tasks</h2></div><Target size={21} /></div>
+                <div className="task-stack">
+                  {(todayTasks.length ? todayTasks : rankedTasks.slice(0, 3)).map((task) => (
+                    <TaskCard key={task.id} task={task} onEdit={handleEditTask} onDelete={handleDeleteTask} onToggleComplete={handleToggleComplete} />
+                  ))}
+                  {!rankedTasks.length && <EmptyState title="No tasks yet">Create a task to build today's plan.</EmptyState>}
+                </div>
+              </div>
+
+              <div className="card">
+                <div className="card-header"><div><span className="subtle-label">Calendar</span><h2>Upcoming Deadlines</h2></div><Timer size={21} /></div>
+                <div className="deadline-list">
+                  {(upcomingTasks.length ? upcomingTasks : rankedTasks).slice(0, 4).map((task) => (
+                    <article className="deadline-item" key={task.id}>
+                      <TaskIcon category={task.type} />
+                      <div><h3>{getTaskTitle(task)}</h3><p>{formatDeadline(task.deadline)}</p></div>
+                      <span>{task.effort}m</span>
+                    </article>
+                  ))}
+                  {!rankedTasks.length && <EmptyState title="No deadlines">Deadlines will appear here once tasks exist.</EmptyState>}
+                </div>
+              </div>
+
+              <div className="card assistant-card">
+                <div className="card-header"><div><span className="subtle-label">AI Recommendation</span><h2>Next Move</h2></div><Bot size={22} /></div>
+                <div className="assistant-message">
+                  {topTask && <span className="assistant-chip">{getRisk(topTask.deadline)} risk</span>}
+                  {isAnalyzingTasks ? (
+                    <><span className="loader" /><p>Analyzing your tasks...</p></>
+                  ) : aiError ? (
+                    <p>{aiError}</p>
+                  ) : (
+                    <><h3>{aiRecommendation.priorityTask}</h3><p>{aiRecommendation.reason}</p><p><strong>Focus:</strong> {aiRecommendation.focusTime}</p><p><strong>Next:</strong> {aiRecommendation.nextAction}</p></>
+                  )}
+                </div>
+              </div>
+            </section>
+
+            <section className="dashboard-grid bottom-grid">
+              <div className="card">
+                <div className="card-header"><div><span className="subtle-label">Shortcuts</span><h2>Quick Actions</h2></div><SlidersHorizontal size={21} /></div>
+                <div className="quick-actions">
+                  <button type="button" onClick={handleOpenTaskModal}><Plus size={17} />Add task</button>
+                  <button type="button" onClick={handleAiPrioritize}><Sparkles size={17} />AI Prioritizer</button>
+                  <button type="button" onClick={() => showView("planner")}><CalendarClock size={17} />Plan day</button>
+                </div>
+              </div>
+
+              <div className="card">
+                <div className="card-header"><div><span className="subtle-label">Activity</span><h2>Recent Activity</h2></div><BarChart3 size={21} /></div>
+                <div className="analytics-row"><span>Total tasks</span><strong>{tasks.length}</strong></div>
+                <div className="analytics-row"><span>Critical risks</span><strong>{criticalTasks.length}</strong></div>
+                <div className="analytics-row"><span>Focus minutes</span><strong>{totalEffort}</strong></div>
+                <div className="analytics-row"><span>Average priority</span><strong>{averagePriority || 0}</strong></div>
+              </div>
+            </section>
+          </div>
+        )}
+
+        {activeView === "tasks" && (
+          <section className="card task-manager">
+            <div className="card-header">
+              <div><span className="subtle-label">Task Manager</span><h2>All Tasks</h2></div>
+              <div className="task-manager-actions">
+                <button className="secondary-action wide-action" type="button" onClick={handleAiPrioritize}><Sparkles size={18} />AI Prioritizer</button>
+                <button className="primary-action" type="button" onClick={handleOpenTaskModal}><Plus size={18} />Add Task</button>
+              </div>
+            </div>
+            <label className="search-box task-search" aria-label="Search tasks">
+              <Search size={18} />
+              <input type="search" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search tasks, deadlines, priorities..." />
+            </label>
+            <div className="task-filters">
+              <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
+                <option value="all">All categories</option>
+                {taskTypes.map((type) => <option key={type.key} value={type.key}>{type.label}</option>)}
+              </select>
+              <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+                <option value="all">All statuses</option>
+                <option value="active">Active</option>
+                <option value="completed">Completed</option>
+                {jobStatuses.map((status) => <option key={status}>{status}</option>)}
+              </select>
+              <select value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value)}>
+                <option value="all">All priorities</option>
+                {priorityOptions.map((priority) => <option key={priority}>{priority}</option>)}
+              </select>
+            </div>
+            <div className="category-list">
+              {taskTypes.map((type) => (
+                <CategorySection
+                  key={type.key}
+                  type={type}
+                  tasks={filteredTasks.filter((task) => task.type === type.key)}
+                  collapsed={collapsedSections[type.key]}
+                  onToggle={(key) => setCollapsedSections((current) => ({ ...current, [key]: !current[key] }))}
+                  onEdit={handleEditTask}
+                  onDelete={handleDeleteTask}
+                  onToggleComplete={handleToggleComplete}
+                />
+              ))}
+            </div>
+          </section>
+        )}
+
+        {activeView === "planner" && (
+          <section className="planner-layout">
+            <div className="card planner-control-card">
+              <div className="card-header"><div><span className="subtle-label">Working Hours</span><h2>Daily Plan</h2></div><Clock size={21} /></div>
+              <div className="form-row">
+                <label>Start Time<input type="time" value={settingsState.startTime} onChange={(event) => updateSetting("startTime", event.target.value)} /></label>
+                <label>End Time<input type="time" value={settingsState.endTime} onChange={(event) => updateSetting("endTime", event.target.value)} /></label>
+              </div>
+              <button className="primary-action planner-generate" type="button" onClick={handleAiPrioritize}><Sparkles size={18} />Generate Plan</button>
+            </div>
+
+            <div className="card planner-board">
+              <div className="card-header"><div><span className="subtle-label">Timeline</span><h2>Focus Blocks</h2></div><CalendarClock size={21} /></div>
+              <div className="timeline-list">
+                {rankedTasks.slice(0, 5).map((task, index) => (
+                  <article className="timeline-card" key={task.id}>
+                    <span>{index === 0 ? settingsState.startTime : `${Number(settingsState.startTime.slice(0, 2)) + index}:00`}</span>
+                    <div><h3>{getTaskTitle(task)}</h3><p>{categoryMeta[task.type]?.shortLabel || task.type} - {formatDeadline(task.deadline)}</p></div>
+                    <strong>{task.effort}m</strong>
+                  </article>
+                ))}
+                {!rankedTasks.length && <EmptyState title="Your plan is clear">Add tasks, then generate a focus plan for the day.</EmptyState>}
+              </div>
+            </div>
+          </section>
+        )}
+
+        {activeView === "settings" && (
+          <section className="settings-grid">
+            <div className="card settings-card">
+              <div className="settings-heading"><Palette size={20} /><h2>Appearance</h2></div>
+              <div className="segmented-control">
+                <button className={theme === "light" ? "active" : ""} type="button" onClick={() => theme === "dark" && onToggleTheme()}><Sun size={17} />Light Mode</button>
+                <button className={theme === "dark" ? "active" : ""} type="button" onClick={() => theme === "light" && onToggleTheme()}><Moon size={17} />Dark Mode</button>
+              </div>
+              <div className="accent-grid">
+                {accentPresets.map((preset) => (
+                  <button key={preset.value} className={accentColor === preset.value ? "active" : ""} type="button" onClick={() => setAccentColor(preset.value)}>
+                    <span style={{ background: preset.value }} />
+                    {preset.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="card settings-card">
+              <div className="settings-heading"><Timer size={20} /><h2>Productivity</h2></div>
+              <div className="form-row">
+                <label>Start Time<input type="time" value={settingsState.startTime} onChange={(event) => updateSetting("startTime", event.target.value)} /></label>
+                <label>End Time<input type="time" value={settingsState.endTime} onChange={(event) => updateSetting("endTime", event.target.value)} /></label>
+              </div>
+              <label>Daily Focus Goal<input type="range" min="1" max="10" value={settingsState.focusGoal} onChange={(event) => updateSetting("focusGoal", event.target.value)} /><span>{settingsState.focusGoal} hours</span></label>
+              <div className="form-row">
+                <label>Pomodoro Duration<input type="number" min="5" value={settingsState.pomodoro} onChange={(event) => updateSetting("pomodoro", event.target.value)} /></label>
+                <label>Short Break Duration<input type="number" min="1" value={settingsState.shortBreak} onChange={(event) => updateSetting("shortBreak", event.target.value)} /></label>
+              </div>
+              <label>Long Break Duration<input type="number" min="5" value={settingsState.longBreak} onChange={(event) => updateSetting("longBreak", event.target.value)} /></label>
+            </div>
+
+            <div className="card settings-card">
+              <div className="settings-heading"><Bell size={20} /><h2>Notifications</h2></div>
+              {[["deadlineReminders", "Deadline reminders"], ["aiSuggestions", "AI Suggestions"], ["browserNotifications", "Browser Notifications"], ["emailNotifications", "Email Notifications"]].map(([key, label]) => (
+                <div className="settings-row" key={key}><span>{label}</span><ToggleSwitch checked={settingsState[key]} onChange={(value) => updateSetting(key, value)} label={label} /></div>
+              ))}
+            </div>
+
+            <div className="card settings-card">
+              <div className="settings-heading"><Bot size={20} /><h2>AI Preferences</h2></div>
+              <label>AI Planning Style<select value={settingsState.planningStyle} onChange={(event) => updateSetting("planningStyle", event.target.value)}><option>Balanced</option><option>Aggressive</option><option>Relaxed</option></select></label>
+              <label>Task Priority Method<select value={settingsState.priorityMethod} onChange={(event) => updateSetting("priorityMethod", event.target.value)}><option>Deadline First</option><option>Impact First</option><option>Balanced</option></select></label>
+            </div>
+
+            <div className="card settings-card">
+              <div className="settings-heading"><Sparkles size={20} /><h2>AI Personality</h2></div>
+              <div className="personality-grid">
+                {["Calm Planner", "Focus Sprint", "Deadline Warrior", "Healthy Balance"].map((personality) => (
+                  <button className={settingsState.aiPersonality === personality ? "active" : ""} type="button" key={personality} onClick={() => updateSetting("aiPersonality", personality)}>{personality}</button>
+                ))}
+              </div>
+            </div>
+
+            <div className="card settings-card">
+              <div className="settings-heading"><User size={20} /><h2>Account</h2></div>
+              <div className="account-block">
+                {currentUser?.photoURL ? <img src={currentUser.photoURL} alt={userName} /> : <span className="avatar large-avatar">{userInitial}</span>}
+                <div><strong>{userName}</strong><p>{currentUser?.email}</p></div>
+              </div>
+              <button className="secondary-action wide-action" type="button">Change Password</button>
+              <button className="secondary-action wide-action" type="button" onClick={handleLogout}>Logout</button>
+            </div>
+
+            <div className="card settings-card danger-zone">
+              <div className="settings-heading"><Trash2 size={20} /><h2>Danger Zone</h2></div>
+              <p>Delete Account</p>
+              <button className="danger-button" type="button">Delete Account</button>
+            </div>
+          </section>
+        )}
+      </section>
+
+      {isTaskModalOpen && (
+        <AddTaskModal editingTask={editingTask} onClose={() => { setEditingTask(null); setIsTaskModalOpen(false); }} onSave={handleSaveTask} />
+      )}
+      {prioritizerModal.isOpen && (
+        <AiPrioritizerModal
+          status={prioritizerModal.status}
+          result={prioritizerModal.result}
+          error={prioritizerModal.error}
+          onClose={() => setPrioritizerModal((current) => ({ ...current, isOpen: false }))}
+        />
+      )}
+    </main>
+  );
+}
+
 function ProtectedRoute({ children }) {
   const { currentUser, loading } = useAuth();
 
@@ -1257,7 +1843,7 @@ export default function App() {
         path="/dashboard"
         element={
           <ProtectedRoute>
-            <Dashboard theme={theme} onToggleTheme={toggleTheme} />
+            <DashboardShell theme={theme} onToggleTheme={toggleTheme} />
           </ProtectedRoute>
         }
       />
